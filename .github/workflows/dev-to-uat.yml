@@ -1,0 +1,69 @@
+name: 2. Dev → UAT Promotion
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "PR number that was merged into dev"
+        required: true
+        type: number
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup Git & tools
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          sudo apt-get install -y jq
+
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch PR diff
+        run: |
+          PR=${{ github.event.inputs.pr_number }}
+          curl -s \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3.diff" \
+            https://api.github.com/repos/${{ github.repository }}/pulls/$PR \
+            > pr.diff
+
+      - name: Create temp branch from uat
+        id: branch
+        run: |
+          BR="promote-pr-${{ github.event.inputs.pr_number }}-$(date +%s)"
+          git checkout -b $BR origin/uat
+          echo "branch=$BR" >> $GITHUB_OUTPUT
+
+      - name: Apply diff
+        run: |
+          git apply --index pr.diff || exit 1
+          git commit -m "Promote PR #${{ github.event.inputs.pr_number }} to uat"
+          git push origin ${{ steps.branch.outputs.branch }}
+
+      - name: Raise PR into uat
+        run: |
+          BRANCH=${{ steps.branch.outputs.branch }}
+          TITLE="Promote PR #${{ github.event.inputs.pr_number }} → uat"
+          BODY="Only the exact changes from PR #${{ github.event.inputs.pr_number }}"
+
+          DATA=$(jq -n \
+            --arg title "$TITLE" \
+            --arg head "$BRANCH" \
+            --arg base "uat" \
+            --arg body "$BODY" \
+            '{title:$title, head:$head, base:$base, body:$body}')
+
+          curl -s -X POST \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d "$DATA" \
+            https://api.github.com/repos/${{ github.repository }}/pulls

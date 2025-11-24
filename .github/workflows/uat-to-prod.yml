@@ -1,0 +1,68 @@
+name: 3. UAT → Prod Promotion
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "PR number merged into uat"
+        required: true
+        type: number
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup Git & Tools
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          sudo apt-get install -y jq
+
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch PR diff
+        run: |
+          PR=${{ github.event.inputs.pr_number }}
+          curl -s \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3.diff" \
+            https://api.github.com/repos/${{ github.repository }}/pulls/$PR \
+            > pr.diff
+
+      - name: Create branch from prod
+        id: branch
+        run: |
+          BR="promote-pr-${{ github.event.inputs.pr_number }}-$(date +%s)"
+          git checkout -b $BR origin/prod
+          echo "branch=$BR" >> $GITHUB_OUTPUT
+
+      - name: Apply diff & push
+        run: |
+          git apply --index pr.diff
+          git commit -m "Promote PR #${{ github.event.inputs.pr_number }} to prod"
+          git push origin ${{ steps.branch.outputs.branch }}
+
+      - name: Raise PR to prod
+        run: |
+          BRANCH=${{ steps.branch.outputs.branch }}
+          TITLE="Promote PR #${{ github.event.inputs.pr_number }} → prod"
+
+          DATA=$(jq -n \
+            --arg title "$TITLE" \
+            --arg head "$BRANCH" \
+            --arg base "prod" \
+            --arg body "Promoting tested changes" \
+          '{title:$title, head:$head, base:$base, body:$body}')
+
+          curl -s -X POST \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d "$DATA" \
+            https://api.github.com/repos/${{ github.repository }}/pulls

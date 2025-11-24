@@ -1,0 +1,59 @@
+name: 1. Feature → Dev Promotion
+
+on:
+  workflow_dispatch:
+    inputs:
+      feature_branch:
+        description: "Name of the feature branch to promote"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  create-pr:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure Git
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Checkout dev and feature branches
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: dev
+
+      - name: Fetch feature branch
+        run: |
+          git fetch origin ${{ github.event.inputs.feature_branch }}
+
+      - name: Calculate diff exists?
+        run: |
+          git diff --quiet origin/dev origin/${{ github.event.inputs.feature_branch }} || echo "has_diff=true" >> $GITHUB_ENV
+
+      - name: Stop if no diff
+        if: env.has_diff != 'true'
+        run: |
+          echo "No differences found. PR not required."
+          exit 1
+
+      - name: Create PR (feature → dev)
+        run: |
+          BRANCH="${{ github.event.inputs.feature_branch }}"
+          TITLE="Promote ${BRANCH} → dev"
+          BODY="Automated PR to promote ${BRANCH} into dev."
+
+          PAYLOAD=$(jq -n --arg title "$TITLE" --arg head "$BRANCH" --arg base "dev" --arg body "$BODY" \
+            '{title:$title, head:$head, base:$base, body:$body}')
+
+          RESP=$(curl -s -X POST \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD" \
+            "https://api.github.com/repos/${{ github.repository }}/pulls")
+
+          echo "Response: $RESP"
