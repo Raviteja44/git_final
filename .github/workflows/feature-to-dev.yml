@@ -1,59 +1,99 @@
-name: 1. Feature → Dev Promotion
-
-on:
-  workflow_dispatch:
-    inputs:
-      feature_branch:
-        description: "Name of the feature branch to promote"
-        required: true
-        type: string
+name: 1. Feature to Dev Promotion
 
 permissions:
   contents: write
   pull-requests: write
 
-jobs:
-  create-pr:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Configure Git
-        run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+on:
+  workflow_dispatch:
+    inputs:
+      feature_branch:
+        description: "Select the feature branch to promote (must start with feature/)"
+        type: choice
+        required: true
+        options:
+          - feature/sample  # placeholder; user must type/choose a valid feature branch manually
 
-      - name: Checkout dev and feature branches
+jobs:
+  promote:
+    name: Promote feature → dev
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: dev
 
-      - name: Fetch feature branch
+      - name: List feature/* branches
+        id: list_branches
         run: |
-          git fetch origin ${{ github.event.inputs.feature_branch }}
+          git fetch --all --prune
+          FEAT=$(git branch -r | grep "origin/feature/" | sed 's|origin/||')
+          echo "branches<<EOF" >> $GITHUB_OUTPUT
+          echo "$FEAT" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          echo "Available feature branches:"
+          echo "$FEAT"
 
-      - name: Calculate diff exists?
+      - name: Validate selected branch is feature/*
         run: |
-          git diff --quiet origin/dev origin/${{ github.event.inputs.feature_branch }} || echo "has_diff=true" >> $GITHUB_ENV
+          if [[ "${{ github.event.inputs.feature_branch }}" != feature/* ]]; then
+            echo "ERROR: You must select a feature/* branch."
+            exit 1
+          fi
 
-      - name: Stop if no diff
-        if: env.has_diff != 'true'
+      - name: Prepare temp promotion branch
+        id: prepare
         run: |
-          echo "No differences found. PR not required."
-          exit 1
+          FB="${{ github.event.inputs.feature_branch }}"
+          TEMP="promote-${FB//\//-}-to-dev-$(date +%Y%m%d_%H%M%S)"
 
-      - name: Create PR (feature → dev)
+          git checkout dev
+          git pull origin dev
+
+          git checkout -b "$TEMP"
+          git merge --no-ff "origin/$FB" || true
+          git push origin "$TEMP"
+
+          echo "temp_branch=$TEMP" >> $GITHUB_OUTPUT
+
+      - name: Collect diff metadata
+        id: diff
         run: |
-          BRANCH="${{ github.event.inputs.feature_branch }}"
-          TITLE="Promote ${BRANCH} → dev"
-          BODY="Automated PR to promote ${BRANCH} into dev."
+          git fetch origin dev
+          git fetch origin "${{ github.event.inputs.feature_branch }}"
 
-          PAYLOAD=$(jq -n --arg title "$TITLE" --arg head "$BRANCH" --arg base "dev" --arg body "$BODY" \
-            '{title:$title, head:$head, base:$base, body:$body}')
+          FILES=$(git diff --name-only origin/dev...origin/${{ github.event.inputs.feature_branch }})
+          COUNT=$(echo "$FILES" | grep -v '^$' | wc -l)
+          MSGS=$(git log --pretty=format:"%h %s" origin/dev..origin/${{ github.event.inputs.feature_branch }})
 
-          RESP=$(curl -s -X POST \
-            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-            -H "Content-Type: application/json" \
-            -d "$PAYLOAD" \
-            "https://api.github.com/repos/${{ github.repository }}/pulls")
+          echo "files<<EOF" >> $GITHUB_OUTPUT
+          echo "$FILES" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
 
-          echo "Response: $RESP"
+          echo "count=$COUNT" >> $GITHUB_OUTPUT
+          echo "messages<<EOF" >> $GITHUB_OUTPUT
+          echo "$MSGS" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Create PR
+        uses: peter-evans/create-pull-request@v6
+        with:
+          branch: ${{ steps.prepare.outputs.temp_branch }}
+          base: dev
+          title: "Promote ${{ github.event.inputs.feature_branch }} → dev PR ID#AUTO"
+          body: |
+            PR ID (dev → uat reference): **AUTO_GENERATED**
+            
+            **Files Changed (count = ${{ steps.diff.outputs.count }})**
+            ```
+            ${{ steps.diff.outputs.files }}
+            ```
+
+            **Commit Messages**
+            ```
+            ${{ steps.diff.outputs.messages }}
+            ```
+
+          labels: promote-to-dev
