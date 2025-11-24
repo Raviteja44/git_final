@@ -12,5 +12,7 @@ INSERT INTO test_users VALUES (2, 'John Roe', 'johnroe@example.com');
 
 INSERT INTO test_users VALUES (3, 'P Ravi', 'pravi@example.com');
 
+INSERT INTO test_users VALUES (4, 'P Teha', 'pteja@example.com');
+
 ---t
 --vffnh
