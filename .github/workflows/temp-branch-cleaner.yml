@@ -1,0 +1,40 @@
+name: 4. Cleanup Temp Branches
+
+on:
+  schedule:
+    - cron: "*/3 * * * *"   # every 3 minutes
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get branches
+        run: |
+          curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            https://api.github.com/repos/${{ github.repository }}/branches \
+            > branches.json
+
+      - name: Delete temp branches
+      # (unchanged)
+        run: |
+          cat branches.json | jq -r '.[].name' | while read BRANCH; do
+
+            if [[ "$BRANCH" == "dev" ]] || \
+               [[ "$BRANCH" == "uat" ]] || \
+               [[ "$BRANCH" == "prod" ]] || \
+               [[ "$BRANCH" == feature/* ]]; then
+              continue
+            fi
+
+            if [[ "$BRANCH" == promote-pr-* ]]; then
+              echo "Deleting $BRANCH..."
+              curl -s -X DELETE \
+                -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+                https://api.github.com/repos/${{ github.repository }}/git/refs/heads/$BRANCH
+            fi
+
+          done
