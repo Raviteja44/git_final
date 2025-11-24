@@ -1,40 +1,44 @@
 name: 4. Cleanup Temp Branches
 
-on:
-  schedule:
-    - cron: "*/3 * * * *"   # every 3 minutes
-  workflow_dispatch:
-
 permissions:
-  contents: write
+  contents: write  # Required for deleting remote branches
+
+on:
+  workflow_dispatch:
 
 jobs:
   cleanup:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Get branches
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Clean temp branches
         run: |
-          curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-            https://api.github.com/repos/${{ github.repository }}/branches \
-            > branches.json
+          echo "Fetching all remote branches..."
+          git fetch --all --prune
 
-      - name: Delete temp branches
-      # (unchanged)
-        run: |
-          cat branches.json | jq -r '.[].name' | while read BRANCH; do
+          # Improved regex to match all temp promotion branches
+          BRANCHES=$(git branch -r | grep -E "origin/promote-[^/]+-to-[^/]+-" | sed 's|origin/||')
 
-            if [[ "$BRANCH" == "dev" ]] || \
-               [[ "$BRANCH" == "uat" ]] || \
-               [[ "$BRANCH" == "prod" ]] || \
-               [[ "$BRANCH" == feature/* ]]; then
-              continue
-            fi
+          if [[ -z "$BRANCHES" ]]; then
+            echo "No temp branches to delete."
+            exit 0
+          fi
 
-            if [[ "$BRANCH" == promote-pr-* ]]; then
-              echo "Deleting $BRANCH..."
-              curl -s -X DELETE \
-                -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-                https://api.github.com/repos/${{ github.repository }}/git/refs/heads/$BRANCH
-            fi
+          echo "Found temp branches to delete:"
+          echo "$BRANCHES"
+          
+          # Optional: Dry-run confirmation (comment out if not needed)
+          # echo "Dry-run: these branches would be deleted."
+          # exit 0
 
+          for BR in $BRANCHES; do
+            echo "Deleting temp branch: $BR"
+            git push origin --delete "$BR" || echo "Warning: branch $BR may already be deleted"
           done
+
+          echo "Cleanup complete."

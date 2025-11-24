@@ -1,68 +1,92 @@
-name: 3. UAT → Prod Promotion
-
-on:
-  workflow_dispatch:
-    inputs:
-      pr_number:
-        description: "PR number merged into uat"
-        required: true
-        type: number
+name: 3. UAT to Prod Promotion
 
 permissions:
   contents: write
   pull-requests: write
 
+on:
+  workflow_dispatch:
+    inputs:
+      pr_id:
+        description: "PR ID merged into uat"
+        required: true
+        type: string
+
 jobs:
   promote:
     runs-on: ubuntu-latest
-    steps:
-      - name: Setup Git & Tools
-        run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          sudo apt-get install -y jq
 
-      - name: Checkout repo
+    steps:
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Fetch PR diff
+      - name: Authenticate GH CLI
         run: |
-          PR=${{ github.event.inputs.pr_number }}
-          curl -s \
-            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-            -H "Accept: application/vnd.github.v3.diff" \
-            https://api.github.com/repos/${{ github.repository }}/pulls/$PR \
-            > pr.diff
+          echo "${{ secrets.GITHUB_TOKEN }}" | gh auth login --with-token
 
-      - name: Create branch from prod
-        id: branch
+      - name: Validate PR merged into uat
         run: |
-          BR="promote-pr-${{ github.event.inputs.pr_number }}-$(date +%s)"
-          git checkout -b $BR origin/prod
-          echo "branch=$BR" >> $GITHUB_OUTPUT
+          MERGED=$(gh pr view ${{ github.event.inputs.pr_id }} --json baseRefName --jq .baseRefName)
+          if [[ "$MERGED" != "uat" ]]; then
+            echo "ERROR: PR #${{ github.event.inputs.pr_id }} was not merged into uat. Sequential promotion violated."
+            exit 1
+          fi
+          echo "PR #${{ github.event.inputs.pr_id }} validated as merged into uat."
 
-      - name: Apply diff & push
+      - name: Create temp promotion branch
+        id: prep
         run: |
-          git apply --index pr.diff
-          git commit -m "Promote PR #${{ github.event.inputs.pr_number }} to prod"
-          git push origin ${{ steps.branch.outputs.branch }}
+          TEMP="promote-uat-to-prod-${{ github.event.inputs.pr_id }}-$(date +%Y%m%d_%H%M%S)"
+          
+          # Checkout prod and pull latest
+          git checkout prod
+          git pull origin prod
+          
+          # Create temp branch and merge uat
+          git checkout -b "$TEMP"
+          git merge --no-ff origin/uat
+          
+          # Push temp branch to origin
+          git push origin "$TEMP"
+          
+          echo "temp=$TEMP" >> $GITHUB_OUTPUT
+          echo "Temporary promotion branch created: $TEMP"
 
-      - name: Raise PR to prod
+      - name: Collect diff and commit metadata
+        id: diff
         run: |
-          BRANCH=${{ steps.branch.outputs.branch }}
-          TITLE="Promote PR #${{ github.event.inputs.pr_number }} → prod"
+          FILES=$(git diff --name-only origin/prod..origin/uat)
+          COUNT=$(echo "$FILES" | grep -v '^$' | wc -l)
+          MSG=$(git log --pretty=format:"%h %s" origin/prod..origin/uat)
+          
+          echo "files<<EOF" >> $GITHUB_OUTPUT
+          echo "$FILES" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          
+          echo "count=$COUNT" >> $GITHUB_OUTPUT
+          
+          echo "messages<<EOF" >> $GITHUB_OUTPUT
+          echo "$MSG" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
 
-          DATA=$(jq -n \
-            --arg title "$TITLE" \
-            --arg head "$BRANCH" \
-            --arg base "prod" \
-            --arg body "Promoting tested changes" \
-          '{title:$title, head:$head, base:$base, body:$body}')
+      - name: Create PR
+        uses: peter-evans/create-pull-request@v6
+        with:
+          branch: ${{ steps.prep.outputs.temp }}
+          base: prod
+          title: "Promote uat → prod PR ID#${{ github.event.inputs.pr_id }}"
+          body: |
+            Reference PR ID (uat merge): **${{ github.event.inputs.pr_id }}**
+            
+            **Files Changed (count = ${{ steps.diff.outputs.count }})**
+            ```
+            ${{ steps.diff.outputs.files }}
+            ```
 
-          curl -s -X POST \
-            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-            -H "Content-Type: application/json" \
-            -d "$DATA" \
-            https://api.github.com/repos/${{ github.repository }}/pulls
+            **Commit Messages**
+            ```
+            ${{ steps.diff.outputs.messages }}
+            ```
+          labels: promote-to-prod
